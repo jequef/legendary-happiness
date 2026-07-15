@@ -1,0 +1,77 @@
+# .circleci/config.yml  (CircleCI 2.1)
+# - test: runs the unit suite on every branch push (also lets the project be set up).
+# - build_and_push: builds the worker image and pushes it to Docker Hub on every v* tag.
+version: 2.1
+
+executors:
+  docker-dind:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: false
+    environment:
+      DOCKER_BUILDKIT: 1
+      COMPOSE_DOCKER_CLI_BUILD: 1
+  py:
+    docker:
+      - image: cimg/python:3.12
+
+jobs:
+  test:
+    executor: py
+    steps:
+      - checkout
+      - run:
+          name: Install deps
+          command: pip install -r requirements.txt pytest
+      - run:
+          name: Run unit tests
+          command: python -m pytest tests/ -q
+
+  build_and_push:
+    executor: docker-dind
+    steps:
+      - checkout
+
+      - run:
+          name: Log in to Docker Hub
+          command: |
+            echo "$DOCKERHUB_PAT" | docker login -u "$DOCKERHUB_USER" --password-stdin
+
+      - run:
+          name: Build & push with cache
+          no_output_timeout: 30m
+          command: |
+            TAG="${CIRCLE_TAG:-latest}"
+            IMG="docker.io/$DOCKERHUB_USER/hmai-loratrainer-hub"
+
+            docker build \
+              --progress=plain \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              --cache-from "${IMG}:buildcache" \
+              -t "${IMG}:${TAG}" .
+
+            docker push "${IMG}:${TAG}"
+
+            # refresh the cache tag for next build
+            docker tag "${IMG}:${TAG}" "${IMG}:buildcache"
+            docker push "${IMG}:buildcache"
+
+workflows:
+  version: 2
+  # Runs on every branch push (default filters = all branches, no tags).
+  # This is also what lets CircleCI "Set Up Project" succeed.
+  test:
+    jobs:
+      - test
+
+  # Heavy image build — tags only.
+  build_on_tag:
+    jobs:
+      - build_and_push:
+          context:
+            - docker-hub
+          filters:
+            tags:
+              only: /^v[0-9]+(\.[0-9]+)*$/   # run on tags like v5 or v1.2.3
+            branches:
+              ignore: /.*/
